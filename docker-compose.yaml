@@ -1,0 +1,71 @@
+x-common-env: &common-env
+  HADOOP_HOME: /opt/hadoop
+  HADOOP_CONF_DIR: /opt/hadoop/etc/hadoop
+  PATH: /opt/hadoop/bin:/opt/hadoop/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+services:
+  namenode:
+    image: hadoop-arm:3.3.6
+    container_name: namenode
+    hostname: namenode
+    command: ["bash", "-lc", "hdfs namenode -format -force && hdfs namenode"]
+    volumes:
+      - ./conf/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+      - ./conf/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml
+      - ./conf/yarn-site.xml:/opt/hadoop/etc/hadoop/yarn-site.xml
+      - ./conf/mapred-site.xml:/opt/hadoop/etc/hadoop/mapred-site.xml
+      - namenode-data:/tmp/hadoop-root/dfs/name
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+
+  datanode:
+    image: hadoop-arm:3.3.6
+    container_name: datanode
+    hostname: datanode
+    command: ["bash", "-lc", "hdfs datanode"]
+    depends_on:
+      - namenode
+    volumes:
+      - ./conf/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+      - ./conf/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml
+      - ./conf/yarn-site.xml:/opt/hadoop/etc/hadoop/yarn-site.xml
+      - ./conf/mapred-site.xml:/opt/hadoop/etc/hadoop/mapred-site.xml
+      - datanode-data:/tmp/hadoop-root/dfs/data
+    ports:
+      - "9864:9864"
+
+  resourcemanager:
+    image: hadoop-arm:3.3.6
+    container_name: resourcemanager
+    hostname: resourcemanager
+    command: ["bash", "-lc", "yarn resourcemanager"]
+    depends_on:
+      - namenode
+    volumes:
+      - ./conf/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+      - ./conf/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml
+      - ./conf/yarn-site.xml:/opt/hadoop/etc/hadoop/yarn-site.xml
+      - ./conf/mapred-site.xml:/opt/hadoop/etc/hadoop/mapred-site.xml
+      - datanode-data:/tmp/hadoop-root/dfs/data
+      - ./test.sh:/opt/test.sh
+    ports:
+      - "8088:8088"
+
+  nodemanager:
+    image: hadoop-arm:3.3.6
+    container_name: nodemanager
+    hostname: nodemanager
+    command: ["bash", "-lc", "yarn nodemanager"]
+    depends_on:
+      - resourcemanager
+    volumes:
+      - ./conf/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+      - ./conf/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml
+      - ./conf/yarn-site.xml:/opt/hadoop/etc/hadoop/yarn-site.xml
+      - ./conf/mapred-site.xml:/opt/hadoop/etc/hadoop/mapred-site.xml
+      - datanode-data:/tmp/hadoop-root/dfs/data
+
+volumes:
+  namenode-data:
+  datanode-data:
