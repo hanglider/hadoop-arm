@@ -49,6 +49,8 @@ services:
       - ./conf/mapred-site.xml:/opt/hadoop/etc/hadoop/mapred-site.xml
       - datanode-data:/tmp/hadoop-root/dfs/data
       - ./test.sh:/opt/test.sh
+      - ./heavy_test.sh:/opt/heavy_test.sh
+      - ./super_heavy_test.sh:/opt/super_heavy_test.sh
     ports:
       - "8088:8088"
 

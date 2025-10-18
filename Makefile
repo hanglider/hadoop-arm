@@ -49,3 +49,14 @@ nuke:
 	$(DOCKER) volume prune -f || true
 
 restart: down up
+
+heavy:
+	docker exec -it resourcemanager bash -lc "bash /opt/heavy_test.sh"
+
+super:
+	docker exec -it resourcemanager bash -lc "bash /opt/super_heavy_test.sh"
+
+alltests:
+	$(MAKE) test
+	$(MAKE) heavy
+	$(MAKE) super
