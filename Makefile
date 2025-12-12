@@ -1,62 +1,86 @@
-# ========= Makefile for native ARM64 Hadoop cluster =========
+SHELL := /bin/bash
 
-APP_NAME := hadoop-arm
-HADOOP_TAG := 3.3.6
+# где выполняем hdfs/hadoop (у тебя это resourcemanager)
+HADOOP_CONTAINER := resourcemanager
 
-DOCKER := docker
-COMPOSE := docker compose
+DATA_DIR ?= data
+EMAILS_FILE ?= $(DATA_DIR)/emails.txt
+SPLITS_DIR ?= $(DATA_DIR)/splits
 
-.PHONY: build up ps logs test run-test down clean nuke restart
+REPOS_FILE ?= repos.txt
+MAX_COMMITS ?= 0
 
-# Build local ARM64 image
-build:
-	$(DOCKER) buildx build --platform linux/arm64 -t $(APP_NAME):$(HADOOP_TAG) . --load
+# чтобы было много map tasks: режем emails на чанки
+SPLIT_LINES ?= 5000
 
-# Start cluster
-up:
-	$(COMPOSE) up -d
+HDFS_INPUT_DIR ?= /input/vendors
+HDFS_OUTPUT_DIR ?= /output/top_vendors
 
-# Status helpers
-ps:
-	$(DOCKER) ps -a --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+# фильтр мусора из логов Hadoop
+NOISE_RE ?= "Unable to load native-hadoop library|packageJobJar:|Connecting to ResourceManager|Disabling Erasure Coding|Submitting tokens|Executing with tokens|resource-types.xml not found|Unable to find 'resource-types.xml'|Submitted application|The url to track the job|Counters:|File System Counters|Map-Reduce Framework|Shuffle Errors|Job Counters|File Input Format Counters|File Output Format Counters|INFO client.DefaultNoHARMFailoverProxyProvider"
 
-logs:
-	@echo "---- namenode ----"; $(DOCKER) logs --tail=60 namenode || true; \
-	echo ""; echo "---- datanode ----"; $(DOCKER) logs --tail=30 datanode || true; \
-	echo ""; echo "---- resourcemanager ----"; $(DOCKER) logs --tail=30 resourcemanager || true; \
-	echo ""; echo "---- nodemanager ----"; $(DOCKER) logs --tail=30 nodemanager || true
+.PHONY: all pipeline prepare git split hdfs-put run show fetch clean
 
-# Run WordCount
-test:
-	$(DOCKER) exec -it resourcemanager bash -lc "bash /opt/test.sh"
+all: pipeline
+pipeline: prepare run fetch
 
-# One-shot: build + up + test
-run-test: build up wait test
+# 1) скачать/обновить репо и собрать emails
+git:
+	@mkdir -p $(DATA_DIR)
+	@python3 tools/extract_emails.py --repos $(REPOS_FILE) --out $(EMAILS_FILE) --max-commits $(MAX_COMMITS)
 
-wait:
-	@echo "Waiting 15s for Hadoop services..."; sleep 15
+# 2) нарезать emails на много файлов => много мапперов
+split: git
+	@rm -rf $(SPLITS_DIR)
+	@mkdir -p $(SPLITS_DIR)
+	@if [[ "$(SPLIT_LINES)" == "0" ]]; then \
+	  cp "$(EMAILS_FILE)" "$(SPLITS_DIR)/part-00000"; \
+	else \
+	  split -l "$(SPLIT_LINES)" -a 4 -d "$(EMAILS_FILE)" "$(SPLITS_DIR)/part-"; \
+	fi
+	@echo "OK: prepared splits in $(SPLITS_DIR) (SPLIT_LINES=$(SPLIT_LINES))"
 
-# Stop / clean
-down:
-	$(COMPOSE) down
+# 3) залить splits в HDFS тихо (без 'Successfully copied ...')
+hdfs-put: split
+	@docker cp $(SPLITS_DIR) $(HADOOP_CONTAINER):/tmp/splits >/dev/null
+	@docker exec -i $(HADOOP_CONTAINER) bash -lc 'hdfs dfs -mkdir -p "$(HDFS_INPUT_DIR)" 2>/dev/null'
+	@docker exec -i $(HADOOP_CONTAINER) bash -lc 'hdfs dfs -rm -r -f "$(HDFS_INPUT_DIR)" >/dev/null 2>&1 || true'
+	@docker exec -i $(HADOOP_CONTAINER) bash -lc 'hdfs dfs -mkdir -p "$(HDFS_INPUT_DIR)" >/dev/null 2>&1'
+	@docker exec -i $(HADOOP_CONTAINER) bash -lc 'hdfs dfs -put -f /tmp/splits/* "$(HDFS_INPUT_DIR)/" >/dev/null 2>&1'
+	@echo "OK: uploaded input to HDFS: $(HDFS_INPUT_DIR)"
+
+prepare: hdfs-put
+
+# 4) запуск job (показываем только прогресс/статус, без мусора)
+run:
+	@docker cp mapper.py $(HADOOP_CONTAINER):/tmp/mapper.py >/dev/null
+	@docker cp reducer.py $(HADOOP_CONTAINER):/tmp/reducer.py >/dev/null
+	@docker exec -i $(HADOOP_CONTAINER) bash -lc '\
+	  set -euo pipefail; \
+	  command -v python3 >/dev/null 2>&1 || (apt-get update >/dev/null && apt-get install -y python3 >/dev/null); \
+	  JAR=$$(ls -1 /opt/hadoop/share/hadoop/tools/lib/hadoop-streaming-*.jar | head -n 1); \
+	  hdfs dfs -rm -r -f "$(HDFS_OUTPUT_DIR)" >/dev/null 2>&1 || true; \
+	  ( hadoop jar "$$JAR" \
+	    -D mapreduce.job.reduces=1 \
+	    -files /tmp/mapper.py,/tmp/reducer.py \
+	    -mapper "python3 mapper.py" \
+	    -reducer "python3 reducer.py" \
+	    -input "$(HDFS_INPUT_DIR)" \
+	    -output "$(HDFS_OUTPUT_DIR)" \
+	  ) 2>&1 \
+	    | grep -vE $(NOISE_RE) \
+	    | grep -E "Running job:|mapreduce.Job:  map|completed successfully|ERROR|Exception|FAILED" || true; \
+	'
+	@echo "OK: output in HDFS: $(HDFS_OUTPUT_DIR)"
+
+# 5) чистый показ результата (никаких WARN)
+show:
+	@docker exec -i $(HADOOP_CONTAINER) bash -lc 'hdfs dfs -cat "$(HDFS_OUTPUT_DIR)"/part-* 2>/dev/null'
+
+fetch:
+	@mkdir -p $(DATA_DIR)
+	@docker exec -i $(HADOOP_CONTAINER) bash -lc 'hdfs dfs -cat "$(HDFS_OUTPUT_DIR)"/part-* 2>/dev/null' > $(DATA_DIR)/result.txt
+	@echo "Saved: $(DATA_DIR)/result.txt"
 
 clean:
-	$(COMPOSE) down -v
-
-nuke:
-	$(COMPOSE) down -v || true
-	$(DOCKER) system prune -af || true
-	$(DOCKER) volume prune -f || true
-
-restart: down up
-
-heavy:
-	docker exec -it resourcemanager bash -lc "bash /opt/heavy_test.sh"
-
-super:
-	docker exec -it resourcemanager bash -lc "bash /opt/super_heavy_test.sh"
-
-alltests:
-	$(MAKE) test
-	$(MAKE) heavy
-	$(MAKE) super
+	@rm -rf $(DATA_DIR)

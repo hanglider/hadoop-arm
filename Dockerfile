@@ -1,5 +1,6 @@
 # Hadoop 3.3.6 image for ARM64 / x86_64
-FROM openjdk:11-jdk-slim
+#FROM openjdk:11-jdk-slim
+FROM eclipse-temurin:11-jdk
 
 ARG HADOOP_VERSION=3.3.6
 ENV HADOOP_HOME=/opt/hadoop \
